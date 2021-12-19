@@ -2,8 +2,30 @@
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
-        <TargetFramework>net5.0</TargetFramework>
-        <RootNamespace>dotnet_mumble_telegram_bot</RootNamespace>
+        <TargetFramework>net6</TargetFramework>
+        <RootNamespace>Knfa.TGM</RootNamespace>
+        <LangVersion>10</LangVersion>
+        <Nullable>enable</Nullable>
     </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="CommandLineParser" Version="2.8.0" />
+        <PackageReference Include="Google.Protobuf" Version="3.17.3" />
+        <PackageReference Include="Grpc" Version="2.40.0" />
+        <PackageReference Include="Grpc.Net.ClientFactory" Version="2.39.0" />
+        <PackageReference Include="Grpc.Tools" Version="2.40.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="Microsoft.Extensions.Hosting" Version="5.0.0" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="5.0.1" />
+        <PackageReference Include="System.Threading.Channels" Version="5.0.0" />
+        <PackageReference Include="Telegram.Bot" Version="16.0.2" />
+        <PackageReference Include="Telegram.Bot.Extensions.Polling" Version="0.2.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Protobuf Include="MurmurRPC.proto" GrpcServices="Client" Access="Internal" />
+    </ItemGroup>
 
 </Project>
