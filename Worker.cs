@@ -39,31 +39,39 @@ internal sealed class TelegramService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        var updater = new QueuedUpdateReceiver(_telegramBotClient);
-        updater.StartReceiving(new[] { UpdateType.Message }, OnReceiveGeneralError, cancellationToken: ct);
-
-        var updatesIterator = updater.YieldUpdatesAsync().GetAsyncEnumerator(ct);
-        var channelIterator = _mumbleEventsChannel.ReadAllAsync(ct).GetAsyncEnumerator(ct);
-        var selectiveAsyncEnumerator = new SelectiveAsyncEnumerator<Update, MumbleEvent>(updatesIterator, channelIterator);
-
-        await foreach (var @event in selectiveAsyncEnumerator)
+        try
         {
-            ct.ThrowIfCancellationRequested();
+            var updater = new QueuedUpdateReceiver(_telegramBotClient);
+            updater.StartReceiving(new[] { UpdateType.Message }, OnReceiveGeneralError, cancellationToken: ct);
 
-            var nextTask = @event switch
+            var updatesIterator = updater.YieldUpdatesAsync().GetAsyncEnumerator(ct);
+            var channelIterator = _mumbleEventsChannel.ReadAllAsync(ct).GetAsyncEnumerator(ct);
+            var selectiveAsyncEnumerator = new SelectiveAsyncEnumerator<Update, MumbleEvent>(updatesIterator, channelIterator);
+
+            await foreach (var @event in selectiveAsyncEnumerator)
             {
-                { Item1.Message: { Chat.Id: var cId, Text: { } t, MessageId: var mId } }
-                    when cId == _telegramChats.OwnerId || cId == _telegramChats.GroupId
-                    => ProcessMessage(cId, mId, t, ct),
+                ct.ThrowIfCancellationRequested();
 
-                { Item2: UserListFetched e } => SendUserList(e, ct),
-                { Item2: UserJoined e } => SendUserJoined(e, ct),
-                { Item2: UserLeft e } => SendUserLeft(e, ct),
+                var nextTask = @event switch
+                {
+                    { Item1.Message: { Chat.Id: var cId, Text: { } t, MessageId: var mId } }
+                        when cId == _telegramChats.OwnerId || cId == _telegramChats.GroupId
+                        => ProcessMessage(cId, mId, t, ct),
 
-                _ => Task.CompletedTask
-            };
+                    { Item2: UserListFetched e } => SendUserList(e, ct),
+                    { Item2: UserJoined e } => SendUserJoined(e, ct),
+                    { Item2: UserLeft e } => SendUserLeft(e, ct),
 
-            await nextTask;
+                    _ => Task.CompletedTask
+                };
+
+                await nextTask;
+            }
+        }
+        catch (Exception e)
+        {
+            _logger.LogError(e, "Error occured, process will exit");
+            Environment.FailFast("Error occured, process will exit", e);
         }
     }
 
@@ -95,7 +103,7 @@ internal sealed class TelegramService : BackgroundService
     {
         switch (messageText)
         {
-            case "/who":
+            case var _ when messageText.StartsWith("/who"):
                 await _telegramEventsChannel.WriteAsync(new UserListRequested(chatId, msgId), ct);
                 return;
         }
@@ -103,17 +111,9 @@ internal sealed class TelegramService : BackgroundService
 
     private async Task SendUserList(UserListFetched userListFetched, CancellationToken ct)
     {
-        string messageText;
-
-        if (userListFetched.Usernames.Length == 0)
-        {
-            messageText = "`no users are connected`";
-        }
-        else
-        {
-            messageText = $"```\n{string.Join("\n", userListFetched.Usernames)}\n```";
-        }
-
+        var messageText = userListFetched.Usernames.Length == 0
+            ? "`no users are connected`"
+            : $"```\n{string.Join("\n", userListFetched.Usernames)}\n```";
 
         await _telegramBotClient.SendTextMessageAsync(
             new ChatId(userListFetched.RequesterId),
@@ -126,7 +126,7 @@ internal sealed class TelegramService : BackgroundService
 
     private Task OnReceiveGeneralError(Exception e, CancellationToken ct)
     {
-        _logger.LogError(e, "Receive error occured: {errorMessage}", e.Message);
+        _logger.LogError(e, "Receive error occured: {ErrorMessage}", e.Message);
         Environment.FailFast("Telegram service failed");
         return Task.CompletedTask;
     }
@@ -145,48 +145,59 @@ internal sealed class MumbleService : BackgroundService
     private readonly V1.V1Client _mumbleGrpcClient;
     private readonly ChannelWriter<MumbleEvent> _mumbleEventsChannel;
     private readonly ChannelReader<TelegramEvent> _telegramEventsChannel;
+    private readonly ILogger<MumbleService> _logger;
 
     public MumbleService(
         V1.V1Client mumbleGrpcClient,
         ChannelWriter<MumbleEvent> mumbleEventsChannel,
-        ChannelReader<TelegramEvent> telegramEventsChannel)
+        ChannelReader<TelegramEvent> telegramEventsChannel,
+        ILogger<MumbleService> logger)
     {
         _mumbleGrpcClient = mumbleGrpcClient;
         _mumbleEventsChannel = mumbleEventsChannel;
         _telegramEventsChannel = telegramEventsChannel;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        var serverResponse = await _mumbleGrpcClient.ServerQueryAsync(new Server.Types.Query());
-        var server = serverResponse.Servers.First();
-
-        var grpcEventStream = _mumbleGrpcClient.ServerEvents(server, cancellationToken: ct).ResponseStream;
-        var telegramEventStream = _telegramEventsChannel.ReadAllAsync(ct).GetAsyncEnumerator(ct);
-        var selectiveIterator =
-            new SelectiveAsyncEnumerator<Server.Types.Event, TelegramEvent>(
-                grpcEventStream.ToAsyncEnumerator(),
-                telegramEventStream);
-
-        await foreach (var @event in selectiveIterator)
+        try
         {
-            ct.ThrowIfCancellationRequested();
+            var serverResponse = await _mumbleGrpcClient.ServerQueryAsync(new Server.Types.Query(), cancellationToken: ct);
+            var server = serverResponse.Servers.First();
 
-            var nextTask = @event switch
+            var grpcEventStream = _mumbleGrpcClient.ServerEvents(server, cancellationToken: ct).ResponseStream;
+            var telegramEventStream = _telegramEventsChannel.ReadAllAsync(ct).GetAsyncEnumerator(ct);
+            var selectiveIterator =
+                new SelectiveAsyncEnumerator<Server.Types.Event, TelegramEvent>(
+                    grpcEventStream.ToAsyncEnumerator(),
+                    telegramEventStream);
+
+            await foreach (var @event in selectiveIterator)
             {
-                { Item1: { Type: Server.Types.Event.Types.Type.UserConnected } e }
-                    => ProduceUserJoinedEvent(e, ct),
+                ct.ThrowIfCancellationRequested();
 
-                { Item1: { Type: Server.Types.Event.Types.Type.UserDisconnected } e }
-                    => ProduceUserLeftEvent(e, ct),
+                var nextTask = @event switch
+                {
+                    { Item1: { Type: Server.Types.Event.Types.Type.UserConnected } e }
+                        => ProduceUserJoinedEvent(e, ct),
 
-                { Item2: UserListRequested e }
-                    => FetchUsersAndProduceEvent(e, server, ct),
+                    { Item1: { Type: Server.Types.Event.Types.Type.UserDisconnected } e }
+                        => ProduceUserLeftEvent(e, ct),
 
-                _ => Task.Delay(TimeSpan.FromSeconds(1), ct)
-            };
+                    { Item2: UserListRequested e }
+                        => FetchUsersAndProduceEvent(e, server, ct),
 
-            await nextTask;
+                    _ => Task.Delay(TimeSpan.FromSeconds(1), ct)
+                };
+
+                await nextTask;
+            }
+        }
+        catch (Exception e)
+        {
+            _logger.LogError(e, "Error occured, process will exit");
+            Environment.FailFast("Error occured, process will exit", e);
         }
     }
 
